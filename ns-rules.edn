@@ -1,0 +1,2 @@
+{duka.marketplace.* {:is-restricted-to [duka.marketplace.* duka.boundary.*]}
+ duka.fulfillment.* {:is-restricted-to [duka.fulfillment.* duka.boundary.*]}}
