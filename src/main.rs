@@ -1,6 +1,6 @@
 #![feature(iter_intersperse)]
 
-use std::{convert::TryFrom, env, ffi::OsStr, iter, path::{self, Path}, str::FromStr};
+use std::{env, ffi::OsStr, fs, iter, path::{self, Path}, str::FromStr};
 use regex::Regex;
 use walkdir::WalkDir;
 
@@ -11,9 +11,8 @@ fn main() {
     // read config file
     // build rule set
     let rules = vec![Rule {
-        namespace: "duka.marketplace.*".parse().unwrap(),
-        allow: vec!["duka.marketplace.*".parse().unwrap(),
-                    "duka.boundary.*".parse().unwrap()]
+        namespace: "duka.boundary.*".parse().unwrap(),
+        allow: vec!["duka.boundary.*".parse().unwrap()]
     }];
 
     // scan for clj cljc cljs files
@@ -30,7 +29,7 @@ fn main() {
     //  (use 'duka.fulfillment.db)
     //  duka.fulfillment.db/fetch-things
     // determine locations of rule violations
-    let report = apply_rules(&rules, &source_files).unwrap();
+    let report = apply_rules(&rules, &source_files);
 
     // print rule violations
     dbg!(report);
@@ -46,11 +45,39 @@ fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
     for entry in source_tree {
         match entry {
             Ok(entry) if entry.file_type().is_file() => {
-                let path = entry.path().strip_prefix(&source_dir)
-                    .expect("source root was not a prefix of file path");
-                match ClojureSourceFile::try_from(path) {
-                    Ok(source_file) => source_files.push(source_file),
-                    Err(error) => warnings.push(error),
+                match entry.path().extension().and_then(OsStr::to_str) {
+                    Some("clj" | "cljs" | "cljc") => {            //    v---- source_dir
+                        let ns = entry.path()            // ~/dev/proj/src/com/my_org/core.clj
+                            .strip_prefix(&source_dir)            //       com/my_org/core.clj
+                            .expect("source root was not a prefix of file path")
+                            .as_os_str()
+                            .to_str()
+                            .and_then(|path| {
+                                let ns = path.rsplit_once('.')    //      (com/my_org/core|clj)
+                                    .expect("file path with clojure extension did not contain '.'")
+                                    .0                            //       com/my_org/core
+                                    .replace(path::MAIN_SEPARATOR, ".") // com.my_org.core
+                                    .replace('_', "-");           //       com.my-org.core
+                                Some(ns)
+                            });
+
+                        let path = entry.path().as_os_str().to_str();
+
+                        if let (Some(mut ns), Some(path)) = (ns, path) {
+                            let path_start = ns.len();
+                            ns.push_str(path);
+                            source_files.push(ClojureSourceFile { entry: ns, path_start });
+                        } else {
+                            warnings.push(format!(
+                                "path {} contains invalid utf8 characters",
+                                &entry.path().display()
+                            ));
+                        }
+                    }
+                    _ => warnings.push(format!(
+                        "{} is not a Clojure source file",
+                        entry.path().display()
+                    ))
                 }
             }
             Err(error) => warnings.push(error.to_string()),
@@ -67,27 +94,13 @@ struct ClojureSourceFile{
     path_start: usize,
 }
 
-impl TryFrom<&Path> for ClojureSourceFile {
-    type Error = String;
+impl ClojureSourceFile {
+    fn path(&self) -> &str {
+        &self.entry[self.path_start..]
+    }
 
-    fn try_from(path: &Path) -> Result<Self, Self::Error> {
-        match path.extension().and_then(OsStr::to_str) {
-            Some("clj" | "cljs" | "cljc") => {
-                let string_path = path.as_os_str()
-                    .to_str()
-                    .ok_or(format!("{} contains invalid utf8 characters", &path.display()))?;
-                let mut ns = string_path.rsplit_once('.')
-                    .expect("file path with clojure extension did not contain '.'")
-                    .0
-                    .replace(path::MAIN_SEPARATOR, ".")
-                    .replace('_', "-");
-                let path_start = ns.len();
-                ns.push_str(string_path);
-
-                Ok(Self { entry: ns, path_start })
-            }
-            _ => Err(format!("{} is not a Clojure source file", path.display()))
-        }
+    fn namespace(&self) -> &str {
+        &self.entry[..self.path_start]
     }
 }
 
@@ -95,15 +108,25 @@ impl TryFrom<&Path> for ClojureSourceFile {
 struct Error;
 
 fn apply_rules(
-    _rules: &[Rule], _source_files: &[ClojureSourceFile],
-) -> Result<Report, String> {
-    // recursively walk all files under src_dir and determine their ns from filename
-    // if ns matches a rule, apply rule to file
+    rules: &[Rule], source_files: &[ClojureSourceFile],
+) -> Report {
+    let mut report = Report::new();
 
-    Ok(Report {
-        violations: vec![],
-        warnings: vec![],
-    })
+    for file in source_files {
+        for rule in rules {
+            if rule.matches(file.namespace()) {
+                match fs::read_to_string(file.path()) {
+                    Ok(code) => rule.apply(&code, &mut report),
+                    Err(error) => report.warning(
+                        format!("failed to read file {}: {}", file.path(), error)
+                    )
+                }
+                break;
+            }
+        }
+    }
+
+    report
 }
 
 #[derive(Debug)]
@@ -112,11 +135,27 @@ struct Report {
     warnings: Vec<String>,
 }
 
+impl Report {
+    fn new() -> Self {
+        Self { violations: vec![], warnings: vec![] }
+    }
+
+    fn warning(&mut self, warning: String) {
+        self.warnings.push(warning);
+    }
+}
+
 #[derive(Debug)]
 struct Violation;
 
 #[derive(Debug)]
 struct NamespaceMatcher(Regex);
+
+impl NamespaceMatcher {
+    fn matches(&self, namespace: &str) -> bool {
+        self.0.is_match(namespace)
+    }
+}
 
 #[derive(Debug)]
 struct Rule {
@@ -125,9 +164,13 @@ struct Rule {
     //cannot_access: Vec<NamespaceMatcher>,
 }
 
-impl NamespaceMatcher {
+impl Rule {
     fn matches(&self, namespace: &str) -> bool {
-        self.0.is_match(namespace)
+        self.namespace.matches(namespace)
+    }
+
+    fn apply(&self, code: &str, report: &mut Report) {
+        dbg!("applying rule");
     }
 }
 
