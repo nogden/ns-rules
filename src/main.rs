@@ -1,8 +1,11 @@
 #![feature(iter_intersperse)]
 
-use std::{env, ffi::OsStr, fs, iter, path::{self, Path}, str::FromStr};
+use std::{env, ffi::OsStr, fmt, fs, iter, path::{self, Path}, str::FromStr};
 use regex::Regex;
 use walkdir::WalkDir;
+use thiserror::Error;
+use miette::{Diagnostic, DiagnosticReportPrinter, GraphicalReportPrinter, NamedSource, SourceSpan};
+use owo_colors::OwoColorize;
 
 fn main() {
     // process args
@@ -12,14 +15,20 @@ fn main() {
     // build rule set
     let rules = vec![Rule {
         namespace: "duka.boundary.*".parse().unwrap(),
-        allow: vec!["duka.boundary.*".parse().unwrap()]
+        allow: vec![
+            "duka.boundary.*".parse().unwrap(),
+            "duka.domain.*".parse().unwrap()
+        ]
     }];
 
     // scan for clj cljc cljs files
     // determine namespace of each file
     let (source_files, warnings) = find_source_files(&source_dir);
-    dbg!(&source_files, &warnings);
 
+    // compile rules against available namespaces
+    let compiled_rules: Vec<_> = rules.into_iter()
+        .map(|rule| rule.compile(&source_files))
+        .collect();
 
     // match namespace to rules
     // scan file for includes:
@@ -29,10 +38,10 @@ fn main() {
     //  (use 'duka.fulfillment.db)
     //  duka.fulfillment.db/fetch-things
     // determine locations of rule violations
-    let report = apply_rules(&rules, &source_files);
+    let report = apply_rules(&compiled_rules, &source_files);
 
     // print rule violations
-    dbg!(report);
+    print!("{}", report);
 }
 
 fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
@@ -81,7 +90,7 @@ fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
                 }
             }
             Err(error) => warnings.push(error.to_string()),
-            _ => continue
+            _ => continue // skip non-files
         }
     }
 
@@ -104,22 +113,22 @@ impl ClojureSourceFile {
     }
 }
 
-#[derive(Debug)]
-struct Error;
-
 fn apply_rules(
-    rules: &[Rule], source_files: &[ClojureSourceFile],
+    rules: &[CompiledRule], source_files: &[ClojureSourceFile],
 ) -> Report {
-    let mut report = Report::new();
+    let mut report = Report::new(source_files);
 
     for file in source_files {
         for rule in rules {
             if rule.matches(file.namespace()) {
+                report.rule_matched();
                 match fs::read_to_string(file.path()) {
-                    Ok(code) => rule.apply(&code, &mut report),
-                    Err(error) => report.warning(
-                        format!("failed to read file {}: {}", file.path(), error)
-                    )
+                    Ok(code) => rule.apply(file, code, &mut report),
+                    Err(error) => {
+                        report.file_skipped(
+                            format!("failed to read file {}: {}", file.path(), error)
+                        );
+                    }
                 }
                 break;
             }
@@ -133,20 +142,88 @@ fn apply_rules(
 struct Report {
     violations: Vec<Violation>,
     warnings: Vec<String>,
+    namespaces_checked: usize,
+    rules_matched: usize,
+    files_skipped: usize,
 }
 
 impl Report {
-    fn new() -> Self {
-        Self { violations: vec![], warnings: vec![] }
+    fn new(file_list: &[ClojureSourceFile]) -> Self {
+        Self {
+            violations: vec![],
+            warnings: vec![],
+            namespaces_checked: file_list.len(),
+            rules_matched: 0,
+            files_skipped: 0,
+        }
     }
 
-    fn warning(&mut self, warning: String) {
+    fn file_skipped(&mut self, warning: String) {
         self.warnings.push(warning);
+    }
+
+    fn violation(&mut self, violation: Violation) {
+        self.violations.push(violation);
+    }
+
+    fn rule_matched(&mut self) {
+        self.rules_matched += 1;
     }
 }
 
-#[derive(Debug)]
-struct Violation;
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.warnings.is_empty() {
+            f.write_str("Warnings:\n\n")?;
+            for warning in self.warnings.iter() {
+                writeln!(f, "    {}, skipped file", warning)?;
+            }
+            f.write_str("\n\n")?;
+        }
+
+        let printer = GraphicalReportPrinter::new();
+        for violation in self.violations.iter() {
+            printer.debug(violation, f)?;
+            f.write_str("\n\n")?;
+        }
+
+        if self.violations.is_empty() {
+            writeln!(f, "{}", "All checks passed".green())?;
+        } else {
+            writeln!(
+                f,
+                "{}",
+                format!("Found {} rule violations", self.violations.len()).red()
+            )?;
+        }
+        writeln!(
+            f,
+            "{:3} namespaces checked\n\
+             {:3} rules matched\n\
+             {:3} files skipped\n",
+            self.namespaces_checked,
+            self.rules_matched,
+            self.warnings.len(),
+        )?;
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error, Diagnostic)]
+#[error("'{src_ns}' is not permitted to reference '{ref_ns}'")]
+#[diagnostic(code(namespace_rule_violation))]
+struct Violation {
+    src: NamedSource,
+    src_ns: String,
+    ref_ns: String,
+
+    #[snippet(src)]
+    snippet: SourceSpan,
+
+    #[highlight(snippet, label("illegal reference occurs here"))]
+    ref_location: SourceSpan,
+}
 
 #[derive(Debug)]
 struct NamespaceMatcher(Regex);
@@ -165,12 +242,61 @@ struct Rule {
 }
 
 impl Rule {
+    fn compile<'s>(self, source_files: &[ClojureSourceFile]) -> CompiledRule {
+        let not_allowed = |source_file: &&ClojureSourceFile| {
+            // A reference is only allowed if it is matched by an allow clause
+            !self.allow.iter().any(|ns| ns.matches(source_file.namespace()))
+        };
+
+        let regex = source_files.iter()
+            .filter(not_allowed)
+            .map(ClojureSourceFile::namespace)
+            .intersperse("|")
+            .collect::<String>()
+            .replace('.', "\\.");
+
+        CompiledRule {
+            namespace: self.namespace,
+            checker: Regex::new(&regex).expect("compiled to invalid regex"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CompiledRule {
+    namespace: NamespaceMatcher,
+    checker: Regex,
+}
+
+impl CompiledRule {
     fn matches(&self, namespace: &str) -> bool {
         self.namespace.matches(namespace)
     }
 
-    fn apply(&self, code: &str, report: &mut Report) {
-        dbg!("applying rule");
+    fn apply(&self, file: &ClojureSourceFile, code: String, report: &mut Report) {
+        for reference in self.checker.find_iter(&code) {
+            let ref_ns = code[reference.start()..reference.end()].to_owned();
+            let snippet_start = code[..reference.start()]
+                .rmatch_indices('\n')
+                .nth(4)
+                .map(|(i, _)| i + 1)  // Skip over the \n itself
+                .unwrap_or(0);
+            let snippet_end = code[reference.end()..]
+                .match_indices('\n')
+                .nth(4)
+                .map(|(i, _)| i + reference.end())
+                .unwrap_or(code.len());
+
+            report.violation(Violation {
+                src: NamedSource::new(file.path(), code.clone()),
+                src_ns: file.namespace().to_owned(),
+                ref_ns,
+                snippet: (snippet_start, snippet_end - snippet_start).into(),
+                ref_location: (
+                    reference.start(), reference.end() - reference.start(),
+                ).into(),
+            });
+        }
     }
 }
 
