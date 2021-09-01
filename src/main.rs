@@ -1,6 +1,6 @@
 #![feature(iter_intersperse)]
 
-use std::{env, ffi::OsStr, fmt, fs, iter, path::{self, Path}, str::FromStr};
+use std::{env, process, fmt, fs, iter, ffi::OsStr, path::{self, Path}, str::FromStr};
 use regex::Regex;
 use walkdir::WalkDir;
 use thiserror::Error;
@@ -17,38 +17,29 @@ fn main() {
         namespace: "duka.boundary.*".parse().unwrap(),
         allow: vec![
             "duka.boundary.*".parse().unwrap(),
-            "duka.domain.*".parse().unwrap()
+            "duka.domain.*".parse().unwrap(),
+            "duka.db.*".parse().unwrap()
         ]
     }];
 
-    // scan for clj cljc cljs files
-    // determine namespace of each file
-    let (source_files, warnings) = find_source_files(&source_dir);
+    let mut report = Report::new();
+    let source_files = find_source_files(&source_dir, &mut report);
 
     // compile rules against available namespaces
     let compiled_rules: Vec<_> = rules.into_iter()
         .map(|rule| rule.compile(&source_files))
         .collect();
 
-    // match namespace to rules
-    // scan file for includes:
-    //  (:require [duka.fulfillment.db])
-    //  (require 'duka.fulfillment.db)
-    //  (:use [duka.fulfillment.db])
-    //  (use 'duka.fulfillment.db)
-    //  duka.fulfillment.db/fetch-things
-    // determine locations of rule violations
-    let report = apply_rules(&compiled_rules, &source_files);
+    apply_rules(&compiled_rules, &source_files, &mut report);
 
-    // print rule violations
     print!("{}", report);
+    process::exit(report.exit_status());
 }
 
 fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
-    source_dir: P
-) -> (Vec<ClojureSourceFile>, Vec<String>) {
+    source_dir: P, report: &mut Report,
+) -> Vec<ClojureSourceFile> {
     let mut source_files = Vec::new();
-    let mut warnings = Vec::new();
 
     let source_tree = WalkDir::new(&source_dir).min_depth(1);
     for entry in source_tree {
@@ -77,24 +68,25 @@ fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
                             ns.push_str(path);
                             source_files.push(ClojureSourceFile { entry: ns, path_start });
                         } else {
-                            warnings.push(format!(
+                            report.file_skipped(format!(
                                 "path {} contains invalid utf8 characters",
                                 &entry.path().display()
                             ));
                         }
                     }
-                    _ => warnings.push(format!(
+                    _ => report.file_skipped(format!(
                         "{} is not a Clojure source file",
                         entry.path().display()
                     ))
                 }
             }
-            Err(error) => warnings.push(error.to_string()),
+            Err(error) => report.file_skipped(error.to_string()),
             _ => continue // skip non-files
         }
     }
+    report.candidate_files(&source_files);
 
-    (source_files, warnings)
+    source_files
 }
 
 #[derive(Debug)]
@@ -114,16 +106,14 @@ impl ClojureSourceFile {
 }
 
 fn apply_rules(
-    rules: &[CompiledRule], source_files: &[ClojureSourceFile],
-) -> Report {
-    let mut report = Report::new(source_files);
-
+    rules: &[CompiledRule], source_files: &[ClojureSourceFile], report: &mut Report
+) {
     for file in source_files {
         for rule in rules {
             if rule.matches(file.namespace()) {
                 report.rule_matched();
                 match fs::read_to_string(file.path()) {
-                    Ok(code) => rule.apply(file, code, &mut report),
+                    Ok(code) => rule.apply(file, code, report),
                     Err(error) => {
                         report.file_skipped(
                             format!("failed to read file {}: {}", file.path(), error)
@@ -134,8 +124,6 @@ fn apply_rules(
             }
         }
     }
-
-    report
 }
 
 #[derive(Debug)]
@@ -148,14 +136,18 @@ struct Report {
 }
 
 impl Report {
-    fn new(file_list: &[ClojureSourceFile]) -> Self {
+    fn new() -> Self {
         Self {
             violations: vec![],
             warnings: vec![],
-            namespaces_checked: file_list.len(),
+            namespaces_checked: 0,
             rules_matched: 0,
             files_skipped: 0,
         }
+    }
+
+    fn candidate_files(&mut self, files: &[ClojureSourceFile]) {
+        self.namespaces_checked = files.len();
     }
 
     fn file_skipped(&mut self, warning: String) {
@@ -168,6 +160,10 @@ impl Report {
 
     fn rule_matched(&mut self) {
         self.rules_matched += 1;
+    }
+
+    fn exit_status(&self) -> i32 {
+        if self.violations.is_empty() { 0 } else { 1 }
     }
 }
 
@@ -193,17 +189,24 @@ impl fmt::Display for Report {
             writeln!(
                 f,
                 "{}",
-                format!("Found {} rule violations", self.violations.len()).red()
+                format!(
+                    "Found {} rule violation{}",
+                    self.violations.len(),
+                    self.violations.len().pluralise()
+                ).red()
             )?;
         }
         writeln!(
             f,
-            "{:3} namespaces checked\n\
-             {:3} rules matched\n\
-             {:3} files skipped\n",
+            "{:3} namespace{} checked\n\
+             {:3} rule{} matched\n\
+             {:3} file{} skipped\n",
             self.namespaces_checked,
+            self.namespaces_checked.pluralise(),
             self.rules_matched,
+            self.rules_matched.pluralise(),
             self.warnings.len(),
+            self.warnings.len().pluralise(),
         )?;
 
         Ok(())
@@ -218,11 +221,21 @@ struct Violation {
     src_ns: String,
     ref_ns: String,
 
-    #[snippet(src)]
+    #[snippet(src, message("{}", self.src_ns.fg_rgb::<255, 135, 162>()))]
     snippet: SourceSpan,
 
-    #[highlight(snippet, label("illegal reference occurs here"))]
+    #[highlight(snippet, label("this reference is not allowed"))]
     ref_location: SourceSpan,
+}
+
+trait Pluralise {
+    fn pluralise(&self) -> &str;
+}
+
+impl Pluralise for usize {
+    fn pluralise(&self) -> &str {
+        if *self == 1 { "" } else { "s" }
+    }
 }
 
 #[derive(Debug)]
@@ -238,7 +251,7 @@ impl NamespaceMatcher {
 struct Rule {
     namespace: NamespaceMatcher,
     allow: Vec<NamespaceMatcher>,
-    //cannot_access: Vec<NamespaceMatcher>,
+    //deny: Vec<NamespaceMatcher>,
 }
 
 impl Rule {
