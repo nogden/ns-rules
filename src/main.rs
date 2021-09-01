@@ -1,15 +1,44 @@
 #![feature(iter_intersperse)]
 
-use std::{env, process, fmt, fs, iter, ffi::OsStr, path::{self, Path}, str::FromStr};
+use std::{
+    process, fmt, fs, iter,
+    ffi::OsStr,
+    path::{self, Path, PathBuf},
+    str::FromStr
+};
 use regex::Regex;
 use walkdir::WalkDir;
 use thiserror::Error;
-use miette::{Diagnostic, DiagnosticReportPrinter, GraphicalReportPrinter, NamedSource, SourceSpan};
+use miette::{
+    Diagnostic,
+    DiagnosticReportPrinter,
+    GraphicalReportPrinter,
+    NamedSource,
+    SourceSpan
+};
 use owo_colors::OwoColorize;
+use clap::{AppSettings, Clap};
+
+/// Applies namespace referencing rules to Clojure source code.
+#[derive(Clap)]
+#[clap(version = "1.0", author = "Nick Ogden <nick@nickogden.org>")]
+#[clap(setting = AppSettings::ColoredHelp)]
+pub(crate) struct Options {
+    /// The path to the configuration file.
+    #[clap(short, long, default_value = "ns-rules.edn")]
+    config: PathBuf,
+
+    /// The number of lines of context to print around each violation.
+    #[clap(short = 'n', long, default_value = "4")]
+    context_lines: usize,
+
+    /// The directory where the source code to check is found.
+    #[clap(short, long, default_value="src")]
+    source_dirs: Vec<PathBuf>
+}
 
 fn main() {
-    // process args
-    let source_dir = env::args().skip(1).next().unwrap_or("src".to_string());
+    let options = Options::parse();
 
     // read config file
     // build rule set
@@ -23,7 +52,7 @@ fn main() {
     }];
 
     let mut report = Report::new();
-    let source_files = find_source_files(&source_dir, &mut report);
+    let source_files = find_source_files(&options.source_dirs, &mut report);
 
     // compile rules against available namespaces
     let compiled_rules: Vec<_> = rules.into_iter()
@@ -37,52 +66,56 @@ fn main() {
 }
 
 fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
-    source_dir: P, report: &mut Report,
+    source_dirs: &[P], report: &mut Report,
 ) -> Vec<ClojureSourceFile> {
     let mut source_files = Vec::new();
-
-    let source_tree = WalkDir::new(&source_dir).min_depth(1);
-    for entry in source_tree {
-        match entry {
-            Ok(entry) if entry.file_type().is_file() => {
-                match entry.path().extension().and_then(OsStr::to_str) {
-                    Some("clj" | "cljs" | "cljc") => {            //    v---- source_dir
-                        let ns = entry.path()            // ~/dev/proj/src/com/my_org/core.clj
-                            .strip_prefix(&source_dir)            //       com/my_org/core.clj
-                            .expect("source root was not a prefix of file path")
-                            .as_os_str()
-                            .to_str()
-                            .and_then(|path| {
-                                let ns = path.rsplit_once('.')    //      (com/my_org/core|clj)
-                                    .expect("file path with clojure extension did not contain '.'")
-                                    .0                            //       com/my_org/core
-                                    .replace(path::MAIN_SEPARATOR, ".") // com.my_org.core
-                                    .replace('_', "-");           //       com.my-org.core
-                                Some(ns)
-                            });
-
-                        let path = entry.path().as_os_str().to_str();
-
-                        if let (Some(mut ns), Some(path)) = (ns, path) {
-                            let path_start = ns.len();
-                            ns.push_str(path);
-                            source_files.push(ClojureSourceFile { entry: ns, path_start });
-                        } else {
-                            report.file_skipped(format!(
-                                "path {} contains invalid utf8 characters",
-                                &entry.path().display()
-                            ));
-                        }
-                    }
-                    _ => report.file_skipped(format!(
-                        "{} is not a Clojure source file",
-                        entry.path().display()
-                    ))
+    for source_dir in source_dirs {
+        let source_tree = WalkDir::new(&source_dir).min_depth(1);
+        for entry in source_tree {
+            let file = match entry {
+                Ok(entry) if entry.file_type().is_file() => entry,
+                Err(error) => {
+                    report.file_skipped(error.to_string());
+                    continue;
                 }
+                _ => continue // skip non-files
+            };
+
+            let ext = file.path().extension().and_then(OsStr::to_str);
+            if let Some("clj" | "cljs" | "cljc") = ext {   //  v---- source_dir
+                let ns = file.path()            // ~/dev/proj/src/com/my_org/core.clj
+                    .strip_prefix(&source_dir)             //     com/my_org/core.clj
+                    .expect("source root was not a prefix of file path")
+                    .as_os_str()
+                    .to_str()
+                    .and_then(|path| {
+                        let ns = path.rsplit_once('.')     //     (com/my_org/core|clj)
+                            .expect("file path with clojure extension did not contain '.'")
+                            .0                             //      com/my_org/core
+                            .replace(path::MAIN_SEPARATOR, ".") // com.my_org.core
+                            .replace('_', "-");            //      com.my-org.core
+                        Some(ns)
+                    });
+
+                let path = file.path().as_os_str().to_str();
+                if let (Some(mut ns), Some(path)) = (ns, path) {
+                    let path_start = ns.len();
+                    ns.push_str(path);
+                    source_files.push(ClojureSourceFile { entry: ns, path_start });
+                } else {
+                    report.file_skipped(format!(
+                        "path {} contains invalid utf8 characters, skipping",
+                        &file.path().display()
+                    ));
+                }
+            } else /* not a Clojure source file */ {
+                report.file_skipped(format!(
+                    "{} is not a Clojure source file, skipping",
+                    file.path().display()
+                ));
             }
-            Err(error) => report.file_skipped(error.to_string()),
-            _ => continue // skip non-files
         }
+
     }
     report.candidate_files(&source_files);
 
@@ -170,9 +203,9 @@ impl Report {
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !self.warnings.is_empty() {
-            f.write_str("Warnings:\n\n")?;
+            f.write_str("Warnings:\n")?;
             for warning in self.warnings.iter() {
-                writeln!(f, "    {}, skipped file", warning)?;
+                writeln!(f, "  {}", warning)?;
             }
             f.write_str("\n\n")?;
         }
