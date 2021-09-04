@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 use thiserror::Error;
 use miette::{
     Diagnostic,
+    DiagnosticResult,
     DiagnosticReportPrinter,
     GraphicalReportPrinter,
     NamedSource,
@@ -18,6 +19,8 @@ use miette::{
 };
 use owo_colors::OwoColorize;
 use clap::{AppSettings, Clap};
+
+mod config;
 
 /// Applies namespace referencing rules to Clojure source code.
 #[derive(Clap)]
@@ -31,16 +34,12 @@ pub(crate) struct Options {
     /// The number of lines of context to print around each violation.
     #[clap(short = 'n', long, default_value = "4")]
     context_lines: usize,
-
-    /// The directory where the source code to check is found.
-    #[clap(short, long, default_value="src")]
-    source_dirs: Vec<PathBuf>
 }
 
-fn main() {
+fn main() -> DiagnosticResult<()> {
     let options = Options::parse();
+    let config = config::read_file(options.config)?;
 
-    // read config file
     // build rule set
     let rules = vec![Rule {
         namespace: "duka.boundary.*".parse().unwrap(),
@@ -52,7 +51,7 @@ fn main() {
     }];
 
     let mut report = Report::new();
-    let source_files = find_source_files(&options.source_dirs, &mut report);
+    let source_files = find_source_files(&config.source_dirs, &mut report);
 
     // compile rules against available namespaces
     let compiled_rules: Vec<_> = rules.into_iter()
@@ -207,7 +206,7 @@ impl fmt::Display for Report {
             for warning in self.warnings.iter() {
                 writeln!(f, "  {}", warning)?;
             }
-            f.write_str("\n\n")?;
+            f.write_str("\n")?;
         }
 
         let printer = GraphicalReportPrinter::new();
