@@ -230,8 +230,8 @@ impl fmt::Display for Report {
         }
         writeln!(
             f,
-            "{:3} namespace{} checked\n\
-             {:3} rule{} matched\n\
+            "{:3} file{} checked\n\
+             {:3} namespace{} matched a rule\n\
              {:3} file{} skipped\n",
             self.namespaces_checked,
             self.namespaces_checked.pluralise(),
