@@ -1,3 +1,4 @@
 {:src-dirs ["src"]
- :rules    [duka.marketplace.* {:is-restricted-to [duka.marketplace.* duka.boundary.*]}
-            duka.fulfilment.*  {:is-restricted-to [duka.fulfilment.* duka.boundary.*]}]}
+ :rules    [duka.marketplace.* {:restrict-to [duka.marketplace.* duka.boundary.*]}
+            duka.fulfilment.*  {:restrict-to [duka.fulfilment.* duka.boundary.*]}
+            duka.boundary.*    {:restrict-to [duka.boundary.*]}]}

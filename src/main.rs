@@ -37,24 +37,14 @@ pub(crate) struct Options {
 }
 
 fn main() -> DiagnosticResult<()> {
-    let options = Options::parse();
-    let config = config::read_file(options.config)?;
-
-    // build rule set
-    let rules = vec![Rule {
-        namespace: "duka.boundary.*".parse().unwrap(),
-        allow: vec![
-            "duka.boundary.*".parse().unwrap(),
-            "duka.domain.*".parse().unwrap(),
-            "duka.db.*".parse().unwrap()
-        ]
-    }];
-
     let mut report = Report::new();
+
+    let options = Options::parse();
+    let config = config::read_file(options.config, &mut report)?;
+
     let source_files = find_source_files(&config.source_dirs, &mut report);
 
-    // compile rules against available namespaces
-    let compiled_rules: Vec<_> = rules.into_iter()
+    let compiled_rules: Vec<_> = config.rules.into_iter()
         .map(|rule| rule.compile(&source_files))
         .collect();
 
@@ -162,7 +152,7 @@ fn apply_rules(
 struct Report {
     violations: Vec<Violation>,
     warnings: Vec<String>,
-    namespaces_checked: usize,
+    files_checked: usize,
     rules_matched: usize,
     files_skipped: usize,
 }
@@ -172,18 +162,19 @@ impl Report {
         Self {
             violations: vec![],
             warnings: vec![],
-            namespaces_checked: 0,
+            files_checked: 0,
             rules_matched: 0,
             files_skipped: 0,
         }
     }
 
     fn candidate_files(&mut self, files: &[ClojureSourceFile]) {
-        self.namespaces_checked = files.len();
+        self.files_checked = files.len();
     }
 
     fn file_skipped(&mut self, warning: String) {
         self.warnings.push(warning);
+        self.files_skipped += 1;
     }
 
     fn violation(&mut self, violation: Violation) {
@@ -192,6 +183,10 @@ impl Report {
 
     fn rule_matched(&mut self) {
         self.rules_matched += 1;
+    }
+
+    fn warn(&mut self, warning: String) {
+        self.warnings.push(warning);
     }
 
     fn exit_status(&self) -> i32 {
@@ -233,12 +228,12 @@ impl fmt::Display for Report {
             "{:3} file{} checked\n\
              {:3} namespace{} matched a rule\n\
              {:3} file{} skipped\n",
-            self.namespaces_checked,
-            self.namespaces_checked.pluralise(),
+            self.files_checked,
+            self.files_checked.pluralise(),
             self.rules_matched,
             self.rules_matched.pluralise(),
-            self.warnings.len(),
-            self.warnings.len().pluralise(),
+            self.files_skipped,
+            self.files_skipped.pluralise(),
         )?;
 
         Ok(())
@@ -246,7 +241,7 @@ impl fmt::Display for Report {
 }
 
 #[derive(Debug, Error, Diagnostic)]
-#[error("'{src_ns}' is not permitted to reference '{ref_ns}'")]
+#[error("'{src_ns}' is not allowed to reference '{ref_ns}'")]
 #[diagnostic(code(namespace_rule_violation))]
 struct Violation {
     src: NamedSource,
@@ -276,6 +271,42 @@ struct NamespaceMatcher(Regex);
 impl NamespaceMatcher {
     fn matches(&self, namespace: &str) -> bool {
         self.0.is_match(namespace)
+    }
+}
+
+impl FromStr for NamespaceMatcher {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "" => Err("namespace patterns cannot be empty")?,
+            s if s.contains(' ')
+                => Err("namespace patterns cannot contains spaces")?,
+            s if s.starts_with('.') || s.ends_with('.')
+                => Err("namespace patterns cannot start with or end with '.'")?,
+            _ => {}
+        }
+
+        // Characters allowed in EDN symbols
+        // For a segment we exclude '.', but we include it for the whole ns.
+        const NS_REGEX: &str = r"[[[:alnum:]]\.\*\+!\-_\?\$%\&=<>]+";
+        const NS_SEGMENT_REGEX: &str = r"[[[:alnum:]]\*\+!\-_\?\$%\&=<>]+";
+
+        let pattern: String = if let Some((head, "*")) = s.rsplit_once('.') {
+            // Last element is a wildcard, os we end with recursive search
+            head.split('.')
+                .map(|segment| segment.replace('*', NS_SEGMENT_REGEX))
+                .chain(iter::once(NS_REGEX.to_string()))
+                .intersperse("\\.".to_string())
+                .collect()
+        } else {
+            s.split('.')
+                .map(|segment| segment.replace('*', NS_SEGMENT_REGEX))
+                .intersperse("\\.".to_string())
+                .collect()
+        };
+
+        Ok(Self(Regex::new(&pattern).expect("generated invalid regex")))
     }
 }
 
@@ -342,37 +373,6 @@ impl CompiledRule {
                 ).into(),
             });
         }
-    }
-}
-
-impl FromStr for NamespaceMatcher {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() || s.contains(' ') || s.starts_with('.') || s.ends_with('.') {
-            return Err("invalid namespace name")
-        }
-
-        // Characters allowed in EDN symbols
-        // For a segment we exclude '.', but we include it for the whole ns.
-        const NS_REGEX: &str = r"[[[:alnum:]]\.\*\+!\-_\?\$%\&=<>]+";
-        const NS_SEGMENT_REGEX: &str = r"[[[:alnum:]]\*\+!\-_\?\$%\&=<>]+";
-
-        let pattern: String = if let Some((head, "*")) = s.rsplit_once('.') {
-            // Last element is a wildcard, os we end with recursive search
-            head.split('.')
-                .map(|segment| segment.replace('*', NS_SEGMENT_REGEX))
-                .chain(iter::once(NS_REGEX.to_string()))
-                .intersperse("\\.".to_string())
-                .collect()
-        } else {
-            s.split('.')
-                .map(|segment| segment.replace('*', NS_SEGMENT_REGEX))
-                .intersperse("\\.".to_string())
-                .collect()
-        };
-
-        Ok(Self(Regex::new(&pattern).expect("generated invalid regex")))
     }
 }
 
