@@ -227,11 +227,14 @@ impl fmt::Display for Report {
             f,
             "{:3} file{} checked\n\
              {:3} namespace{} matched a rule\n\
+             {:3} warning{}\n\
              {:3} file{} skipped\n",
             self.files_checked,
             self.files_checked.pluralise(),
             self.rules_matched,
             self.rules_matched.pluralise(),
+            self.warnings.len(),
+            self.warnings.len().pluralise(),
             self.files_skipped,
             self.files_skipped.pluralise(),
         )?;
