@@ -82,3 +82,11 @@ Found 1 rule violation
 
 By calling ns-rules from a Git pre-commit hook you can ensure that the commit
 will fail if your dependency rules are violated.
+
+# But why is this Clojure tool written in Rust?
+
+Clojure is a beautiful language and a joy to use, but it is not a good fit for
+all cases. A CLI tool such as this should not make the user wait and Clojure's
+lengthy startup time prevents instant results. Personally, I hate waiting for
+my tools and on todays hardware there is no excuse for something like this not
+to be instant, so Rust it is.
