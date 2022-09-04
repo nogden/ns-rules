@@ -1,0 +1,5 @@
+{:src-dirs ["src"]
+ :rules    [shipping.entity.*   {:restrict-to [shipping.entity.*]}
+            shipping.service.*  {:restrict-to [shipping.entity.*]}
+            shipping.use-case.* {:restrict-to [shipping.entity.*
+                                               shipping.service.*]}]}
