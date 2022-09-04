@@ -1,24 +1,21 @@
 #![feature(iter_intersperse)]
 
-use std::{
-    process, fmt, fs, iter,
-    ffi::OsStr,
-    path::{self, Path, PathBuf},
-    str::FromStr
-};
-use regex::Regex;
-use walkdir::WalkDir;
-use thiserror::Error;
+use clap::{AppSettings, Clap};
 use miette::{
-    Diagnostic,
-    DiagnosticResult,
-    DiagnosticReportPrinter,
-    GraphicalReportPrinter,
-    NamedSource,
-    SourceSpan
+    Diagnostic, DiagnosticReportPrinter, DiagnosticResult,
+    GraphicalReportPrinter, NamedSource, SourceSpan,
 };
 use owo_colors::OwoColorize;
-use clap::{AppSettings, Clap};
+use regex::Regex;
+use std::{
+    ffi::OsStr,
+    fmt, fs, iter,
+    path::{self, Path, PathBuf},
+    process,
+    str::FromStr,
+};
+use thiserror::Error;
+use walkdir::WalkDir;
 
 mod config;
 
@@ -44,7 +41,9 @@ fn main() -> DiagnosticResult<()> {
 
     let source_files = find_source_files(&config.source_dirs, &mut report);
 
-    let compiled_rules: Vec<_> = config.rules.into_iter()
+    let compiled_rules: Vec<_> = config
+        .rules
+        .into_iter()
         .map(|rule| rule.compile(&source_files))
         .collect();
 
@@ -54,8 +53,9 @@ fn main() -> DiagnosticResult<()> {
     process::exit(report.exit_status());
 }
 
-fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
-    source_dirs: &[P], report: &mut Report,
+fn find_source_files<P: AsRef<Path> + std::fmt::Debug>(
+    source_dirs: &[P],
+    report: &mut Report,
 ) -> Vec<ClojureSourceFile> {
     let mut source_files = Vec::new();
     for source_dir in source_dirs {
@@ -67,19 +67,20 @@ fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
                     report.file_skipped(error.to_string());
                     continue;
                 }
-                _ => continue // skip non-files
+                _ => continue, // skip non-files
             };
 
             let ext = file.path().extension().and_then(OsStr::to_str);
-            if let Some("clj" | "cljs" | "cljc") = ext {   //  v---- source_dir
+            if let Some("clj" | "cljs" | "cljc") = ext {
+                //  v---- source_dir
                 let ns = file.path()            // ~/dev/proj/src/com/my_org/core.clj
                     .strip_prefix(&source_dir)             //     com/my_org/core.clj
-                    .expect("source root was not a prefix of file path")
+                    .expect("source root is a prefix of file path")
                     .as_os_str()
                     .to_str()
                     .and_then(|path| {
                         let ns = path.rsplit_once('.')     //     (com/my_org/core|clj)
-                            .expect("file path with clojure extension did not contain '.'")
+                            .expect("file path with clojure extension must contain '.'")
                             .0                             //      com/my_org/core
                             .replace(path::MAIN_SEPARATOR, ".") // com.my_org.core
                             .replace('_', "-");            //      com.my-org.core
@@ -90,21 +91,25 @@ fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
                 if let (Some(mut ns), Some(path)) = (ns, path) {
                     let path_start = ns.len();
                     ns.push_str(path);
-                    source_files.push(ClojureSourceFile { entry: ns, path_start });
+                    source_files.push(ClojureSourceFile {
+                        entry: ns,
+                        path_start,
+                    });
                 } else {
                     report.file_skipped(format!(
                         "path {} contains invalid utf8 characters, skipping",
                         &file.path().display()
                     ));
                 }
-            } else /* not a Clojure source file */ {
+            } else
+            /* not a Clojure source file */
+            {
                 report.file_skipped(format!(
                     "{} is not a Clojure source file, skipping",
                     file.path().display()
                 ));
             }
         }
-
     }
     report.candidate_files(&source_files);
 
@@ -112,7 +117,7 @@ fn find_source_files<P: AsRef<Path> + std::fmt::Debug> (
 }
 
 #[derive(Debug)]
-struct ClojureSourceFile{
+struct ClojureSourceFile {
     entry: String,
     path_start: usize,
 }
@@ -128,7 +133,9 @@ impl ClojureSourceFile {
 }
 
 fn apply_rules(
-    rules: &[CompiledRule], source_files: &[ClojureSourceFile], report: &mut Report
+    rules: &[CompiledRule],
+    source_files: &[ClojureSourceFile],
+    report: &mut Report,
 ) {
     for file in source_files {
         for rule in rules {
@@ -137,9 +144,11 @@ fn apply_rules(
                 match fs::read_to_string(file.path()) {
                     Ok(code) => rule.apply(file, code, report),
                     Err(error) => {
-                        report.file_skipped(
-                            format!("failed to read file {}: {}", file.path(), error)
-                        );
+                        report.file_skipped(format!(
+                            "failed to read file {}: {}",
+                            file.path(),
+                            error
+                        ));
                     }
                 }
                 break;
@@ -190,7 +199,11 @@ impl Report {
     }
 
     fn exit_status(&self) -> i32 {
-        if self.violations.is_empty() { 0 } else { 1 }
+        if self.violations.is_empty() {
+            0
+        } else {
+            1
+        }
     }
 }
 
@@ -220,7 +233,8 @@ impl fmt::Display for Report {
                     "Found {} rule violation{}",
                     self.violations.len(),
                     self.violations.len().pluralise()
-                ).red()
+                )
+                .red()
             )?;
         }
         writeln!(
@@ -264,7 +278,11 @@ trait Pluralise {
 
 impl Pluralise for usize {
     fn pluralise(&self) -> &str {
-        if *self == 1 { "" } else { "s" }
+        if *self == 1 {
+            ""
+        } else {
+            "s"
+        }
     }
 }
 
@@ -283,10 +301,12 @@ impl FromStr for NamespaceMatcher {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "" => Err("namespace patterns cannot be empty")?,
-            s if s.contains(' ')
-                => Err("namespace patterns cannot contains spaces")?,
-            s if s.starts_with('.') || s.ends_with('.')
-                => Err("namespace patterns cannot start with or end with '.'")?,
+            s if s.contains(' ') => {
+                Err("namespace patterns cannot contains spaces")?
+            }
+            s if s.starts_with('.') || s.ends_with('.') => {
+                Err("namespace patterns cannot start with or end with '.'")?
+            }
             _ => {}
         }
 
@@ -296,7 +316,7 @@ impl FromStr for NamespaceMatcher {
         const NS_SEGMENT_REGEX: &str = r"[[[:alnum:]]\*\+!\-_\?\$%\&=<>]+";
 
         let pattern: String = if let Some((head, "*")) = s.rsplit_once('.') {
-            // Last element is a wildcard, os we end with recursive search
+            // Last element is a wildcard, so we end with recursive search
             head.split('.')
                 .map(|segment| segment.replace('*', NS_SEGMENT_REGEX))
                 .chain(iter::once(NS_REGEX.to_string()))
@@ -309,7 +329,7 @@ impl FromStr for NamespaceMatcher {
                 .collect()
         };
 
-        Ok(Self(Regex::new(&pattern).expect("generated invalid regex")))
+        Ok(Self(Regex::new(&pattern).expect("valid regex")))
     }
 }
 
@@ -323,11 +343,20 @@ struct Rule {
 impl Rule {
     fn compile<'s>(self, source_files: &[ClojureSourceFile]) -> CompiledRule {
         let not_allowed = |source_file: &&ClojureSourceFile| {
-            // A reference is only allowed if it is matched by an allow clause
-            !self.allow.iter().any(|ns| ns.matches(source_file.namespace()))
+            // Only self-references and references matched by an allow clause
+            // are allowed
+            let in_allow_list = self
+                .allow
+                .iter()
+                .any(|ns| ns.matches(source_file.namespace()));
+            let self_reference =
+                self.namespace.matches(source_file.namespace());
+
+            !in_allow_list && !self_reference
         };
 
-        let regex = source_files.iter()
+        let regex = source_files
+            .iter()
             .filter(not_allowed)
             .map(ClojureSourceFile::namespace)
             .intersperse("|")
@@ -336,7 +365,7 @@ impl Rule {
 
         CompiledRule {
             namespace: self.namespace,
-            checker: Regex::new(&regex).expect("compiled to invalid regex"),
+            checker: Regex::new(&regex).expect("valid regex"),
         }
     }
 }
@@ -352,13 +381,18 @@ impl CompiledRule {
         self.namespace.matches(namespace)
     }
 
-    fn apply(&self, file: &ClojureSourceFile, code: String, report: &mut Report) {
+    fn apply(
+        &self,
+        file: &ClojureSourceFile,
+        code: String,
+        report: &mut Report,
+    ) {
         for reference in self.checker.find_iter(&code) {
             let ref_ns = code[reference.start()..reference.end()].to_owned();
             let snippet_start = code[..reference.start()]
                 .rmatch_indices('\n')
                 .nth(4)
-                .map(|(i, _)| i + 1)  // Skip over the \n itself
+                .map(|(i, _)| i + 1) // Skip over the \n itself
                 .unwrap_or(0);
             let snippet_end = code[reference.end()..]
                 .match_indices('\n')
@@ -372,8 +406,10 @@ impl CompiledRule {
                 ref_ns,
                 snippet: (snippet_start, snippet_end - snippet_start).into(),
                 ref_location: (
-                    reference.start(), reference.end() - reference.start(),
-                ).into(),
+                    reference.start(),
+                    reference.end() - reference.start(),
+                )
+                    .into(),
             });
         }
     }
@@ -385,44 +421,42 @@ mod test {
 
     #[test]
     fn can_match_full_namespace() {
-        let matcher: NamespaceMatcher = "duka.marketplace.db".parse()
-            .expect("no matcher this time :(");
+        let matcher: NamespaceMatcher = "shipping.domain.ship".parse().unwrap();
 
-        assert!(matcher.matches("duka.marketplace.db"));
-        assert!(!matcher.matches("duka.marketplace.kafka"));
+        assert!(matcher.matches("shipping.domain.ship"));
+        assert!(!matcher.matches("shipping.domain.port"));
     }
 
     #[test]
     fn can_match_wildcard_within_namespace() {
-        let matcher: NamespaceMatcher = "duka.market*.db".parse()
-            .expect("no matcher this time :(");
+        let matcher: NamespaceMatcher = "shipping.dom*.ship".parse().unwrap();
 
-        assert!(matcher.matches("duka.marketplace.db"));
-        assert!(matcher.matches("duka.marketvalue.db"));
-        assert!(!matcher.matches("duka.market.db"));
-        assert!(!matcher.matches("duka.marketplace.kafka"));
+        assert!(matcher.matches("shipping.domain.ship"));
+        assert!(matcher.matches("shipping.domestic.ship"));
+        assert!(!matcher.matches("shipping.use-case.routing"));
+        assert!(!matcher.matches("shipping.domain.port"));
     }
 
     #[test]
     fn can_match_wildcard_sub_namespace() {
-        let matcher: NamespaceMatcher = "duka.marketplace.*".parse()
-            .expect("no matcher this time :(");
+        let matcher: NamespaceMatcher = "shipping.use-case.*".parse().unwrap();
 
-        assert!(matcher.matches("duka.marketplace.db"));
-        assert!(matcher.matches("duka.marketplace.kafka"));
-        assert!(matcher.matches("duka.marketplace.db.core"));
-        assert!(!matcher.matches("duka.marketplace"));
-        assert!(!matcher.matches("duka.market.db"));
-        assert!(!matcher.matches("karibu.marketplace.db"));
-
+        assert!(matcher.matches("shipping.use-case.routing"));
+        assert!(matcher.matches("shipping.use-case.contract-verification"));
+        assert!(matcher.matches("shipping.use-case.routing.route"));
+        assert!(!matcher.matches("shipping.use-case"));
+        assert!(!matcher.matches("shipping.domain.ship"));
+        assert!(!matcher.matches("flying.use-case.routing"));
     }
 
     #[test]
     fn reports_error_on_invalid_namespace() {
-        assert!("duka.market place.db".parse::<NamespaceMatcher>().is_err());
+        assert!("shipping.use case.routing"
+            .parse::<NamespaceMatcher>()
+            .is_err());
         assert!("".parse::<NamespaceMatcher>().is_err());
         assert!(".".parse::<NamespaceMatcher>().is_err());
-        assert!(".marketplace".parse::<NamespaceMatcher>().is_err());
-        assert!("marketplace.".parse::<NamespaceMatcher>().is_err());
+        assert!(".use-case".parse::<NamespaceMatcher>().is_err());
+        assert!("use-case.".parse::<NamespaceMatcher>().is_err());
     }
 }
