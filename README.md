@@ -2,7 +2,7 @@
 
 ns-rules allows you to enforce dependency rules between Clojure namespaces.
 
-Consider the folowing imaginary Clojure codebase that handles shipping.
+Consider the following imaginary Clojure codebase that handles shipping.
 
 ```
 src/
@@ -31,10 +31,10 @@ between the various namespaces. Specifically,
 1. entities may only reference other entities,
 1. services may only reference entities,
 1. use_cases may only reference entities and services, and
-1. infrastructure may refernce anything.
+1. infrastructure may reference anything.
 
 These rules are not enforced in anyway and over time, as teams change, such
-rules are often forgotten to the detrement of the codebase.
+rules are often forgotten to the detriment of the codebase.
 
 ns-rules can enforce these rules with the following configuration.
 
@@ -45,12 +45,12 @@ ns-rules.edn
             shipping.service.*  {:restrict-to [shipping.entity.*]}
             shipping.use_case.* {:restrict-to [shipping.entity.*
                                                shipping.service.*]}]}
-``` 
+```
 
-If we run ns-rules in the project root we see that the rules are being obayed.
+If we run ns-rules in the project root we see that the rules are being obeyed.
 
 ```bash
-example $ ns-rules 
+example $ ns-rules
 All checks passed
  12 files checked
   5 namespaces matched a rule
@@ -88,5 +88,5 @@ will fail if your dependency rules are violated.
 Clojure is a beautiful language and a joy to use, but it is not a good fit for
 all cases. A CLI tool such as this should not make the user wait and Clojure's
 lengthy startup time prevents instant results. Personally, I hate waiting for
-my tools and on todays hardware there is no excuse for something like this not
+my tools and on today's hardware there is no excuse for something like this not
 to be instant, so Rust it is.
